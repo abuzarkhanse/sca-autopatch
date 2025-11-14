@@ -1,0 +1,129 @@
+name: Auto-patch CVEs (Python + SBOM + Attest)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * 1" # Mondays 08:00 UTC
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write # needed for keyless signing (cosign)
+
+jobs:
+  autopatch:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ---- Setup environment ----
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install autopatch dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r sca-autopatch/requirements.txt
+
+      # ---- Create vulnerability plan ----
+      - name: Create plan.csv
+        id: plan
+        run: |
+          python -m autopatch.cli plan -r requirements.txt -o plan.csv
+          echo "EXIT=$?" >> $GITHUB_ENV
+
+      - name: Show generated plan
+        run: |
+          echo "Plan (first 20 lines):"
+          head -n 20 plan.csv || true
+
+      # ---- SBOM (Transparency) ----
+      - name: Install Node.js (for cdxgen)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install cdxgen
+        run: npm install -g @cyclonedx/cdxgen
+
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          mkdir -p reports
+          cdxgen -t python -o sbom.cdx.json .
+
+      # ---- Scan (Transparency) ----
+      - name: Install OSV-Scanner
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/google/osv-scanner/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+
+      - name: Scan SBOM with OSV
+        run: |
+          osv-scanner --sbom sbom.cdx.json --format json --output reports/osv-report.json
+
+      # ---- Sign SBOM (Validity) ----
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SBOM (keyless)
+        run: |
+          cosign sign-blob --yes --keyless --output-signature sbom.sig sbom.cdx.json
+
+      # ---- Reproducibility check (Validity) ----
+      - name: Reproducibility (pip freeze twice)
+        run: |
+          python -m venv .r1
+          source .r1/bin/activate
+          pip install -r requirements.txt
+          pip freeze > reports/freeze1.txt
+          deactivate
+
+          python -m venv .r2
+          source .r2/bin/activate
+          pip install -r requirements.txt
+          pip freeze > reports/freeze2.txt
+          deactivate
+
+          diff -u reports/freeze1.txt reports/freeze2.txt > reports/reproducibility.diff || true
+
+      # ---- Apply fixes & create PR (only if plan has changes) ----
+      - name: Apply plan to requirements.txt
+        if: ${{ env.EXIT == '10' }}
+        run: |
+          python -m autopatch.cli apply -r requirements.txt -p plan.csv
+
+      - name: Create pull request
+        if: ${{ env.EXIT == '10' }}
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "autopatch: bump vulnerable dependencies (OSV)"
+          title: "Autopatch: bump vulnerable dependencies"
+          body: |
+            This PR was generated automatically by the autopatch workflow.
+            - SBOM: CycloneDX (`sbom.cdx.json`) — signed with Sigstore (`sbom.sig`)
+            - Scan: OSV report (`reports/osv-report.json`)
+            - Reproducibility diff: (`reports/reproducibility.diff`)
+            - Plan: (`plan.csv`)
+          branch: autopatch/osv-fixes
+          add-paths: |
+            requirements.txt
+            plan.csv
+            sbom.cdx.json
+            sbom.sig
+            reports/osv-report.json
+            reports/reproducibility.diff
+
+      # ---- Upload all artifacts for visibility ----
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: autopatch-reports
+          path: |
+            plan.csv
+            sbom.cdx.json
+            sbom.sig
+            reports/
