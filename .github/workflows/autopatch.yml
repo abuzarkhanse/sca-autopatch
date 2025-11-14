@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
 name: Auto-patch CVEs (Python + SBOM + Attest)
 
 on:
@@ -15,8 +16,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ---- Setup environment ----
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -24,25 +24,33 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install autopatch dependencies
+      - name: Install autopatch deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r sca-autopatch/requirements.txt
+          # Ensure CLI deps are present even if your project requirements don't include them
+          pip install requests packaging tabulate
+          # Install target project deps (used by reproducibility check)
+          if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
 
-      # ---- Create vulnerability plan ----
+      # -- Create plan and capture exit code as a step output (10 = fixes exist) --
       - name: Create plan.csv
         id: plan
+        shell: bash
         run: |
+          set +e
           python -m autopatch.cli plan -r requirements.txt -o plan.csv
-          echo "EXIT=$?" >> $GITHUB_ENV
+          CODE=$?
+          echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "Plan exit code: $CODE"
+          exit 0
 
-      - name: Show generated plan
+      - name: Show plan
         run: |
           echo "Plan (first 20 lines):"
           head -n 20 plan.csv || true
 
       # ---- SBOM (Transparency) ----
-      - name: Install Node.js (for cdxgen)
+      - name: Set up Node (for cdxgen)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -65,59 +73,97 @@ jobs:
         run: |
           osv-scanner --sbom sbom.cdx.json --format json --output reports/osv-report.json
 
-      # ---- Sign SBOM (Validity) ----
+      # ---- Sign + verify SBOM (Validity) ----
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
       - name: Sign SBOM (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
         run: |
-          cosign sign-blob --yes --keyless --output-signature sbom.sig sbom.cdx.json
+          cosign sign-blob --yes --keyless \
+            --output-signature sbom.sig \
+            --output-certificate sbom.cert \
+            sbom.cdx.json
 
-      # ---- Reproducibility check (Validity) ----
+      - name: Verify SBOM signature
+        run: |
+          cosign verify-blob --certificate sbom.cert --signature sbom.sig sbom.cdx.json
+
+      # ---- Reproducibility smoke check (Validity) ----
       - name: Reproducibility (pip freeze twice)
+        shell: bash
         run: |
           python -m venv .r1
           source .r1/bin/activate
           pip install -r requirements.txt
           pip freeze > reports/freeze1.txt
-          deactivate
+          deactivate || true
 
           python -m venv .r2
           source .r2/bin/activate
           pip install -r requirements.txt
           pip freeze > reports/freeze2.txt
-          deactivate
+          deactivate || true
 
           diff -u reports/freeze1.txt reports/freeze2.txt > reports/reproducibility.diff || true
 
-      # ---- Apply fixes & create PR (only if plan has changes) ----
+      # ---- Quick metrics (Transparency/Validity evidence) ----
+      - name: Build metrics summary
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv, json, os
+          fixable = 0
+          total = 0
+          if os.path.exists("plan.csv"):
+              with open("plan.csv", newline="", encoding="utf-8") as f:
+                  for row in csv.DictReader(f):
+                      total += 1
+                      if row.get("fix_version"):
+                          fixable += 1
+          metrics = {"packages_scanned": total, "packages_with_fixes": fixable}
+          os.makedirs("reports", exist_ok=True)
+          with open("reports/metrics.json","w",encoding="utf-8") as f:
+              json.dump(metrics, f, indent=2)
+          print("Metrics:", metrics)
+          PY
+
+      # ---- Apply fixes & create PR (only if fixes exist) ----
       - name: Apply plan to requirements.txt
-        if: ${{ env.EXIT == '10' }}
+        if: ${{ steps.plan.outputs.exit_code == '10' }}
         run: |
           python -m autopatch.cli apply -r requirements.txt -p plan.csv
 
       - name: Create pull request
-        if: ${{ env.EXIT == '10' }}
+        if: ${{ steps.plan.outputs.exit_code == '10' }}
         uses: peter-evans/create-pull-request@v6
         with:
           commit-message: "autopatch: bump vulnerable dependencies (OSV)"
           title: "Autopatch: bump vulnerable dependencies"
           body: |
             This PR was generated automatically by the autopatch workflow.
-            - SBOM: CycloneDX (`sbom.cdx.json`) — signed with Sigstore (`sbom.sig`)
-            - Scan: OSV report (`reports/osv-report.json`)
-            - Reproducibility diff: (`reports/reproducibility.diff`)
-            - Plan: (`plan.csv`)
+
+            **Evidence**
+            - SBOM (CycloneDX): `sbom.cdx.json` — signed (`sbom.sig`, `sbom.cert`)
+            - OSV scan: `reports/osv-report.json`
+            - Reproducibility diff: `reports/reproducibility.diff`
+            - Plan: `plan.csv`
+            - Metrics: `reports/metrics.json`
+
+            **Design properties:** Transparency (SBOM + scan), Validity (signing + reproducibility), Separation (ephemeral CI).
           branch: autopatch/osv-fixes
           add-paths: |
             requirements.txt
             plan.csv
             sbom.cdx.json
             sbom.sig
+            sbom.cert
             reports/osv-report.json
             reports/reproducibility.diff
+            reports/metrics.json
 
-      # ---- Upload all artifacts for visibility ----
+      # ---- Upload artifacts ----
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -126,4 +172,5 @@ jobs:
             plan.csv
             sbom.cdx.json
             sbom.sig
+            sbom.cert
             reports/
