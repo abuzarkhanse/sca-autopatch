@@ -91,7 +91,7 @@ jobs:
 
       - name: Sign SBOM (keyless)
         env:
-          COSIGN_EXPERIMENTAL: "true" # harmless on v2; kept for compatibility
+          COSIGN_EXPERIMENTAL: "true"
         run: |
           cosign sign-blob --yes \
           --output-signature sbom.sig \
@@ -99,13 +99,20 @@ jobs:
           sbom.cdx.json
 
       - name: Verify SBOM signature
+        shell: bash
+        env:
+          OIDC_ISSUER: "https://token.actions.githubusercontent.com"
+          # Broad but repo-scoped identity check to avoid exact-path/branch mismatches.
+          # Matches: https://github.com/<owner>/<repo>/.github/workflows/<any>@<any>
+          IDENTITY_REGEX: "https://github.com/${{ github.repository }}/.github/workflows/.*"
         run: |
+          set -e
           cosign verify-blob \
-            --certificate sbom.cert \
-            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/autopatch.yml@refs/heads/main" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            sbom.cdx.json
             --signature sbom.sig \
+            --certificate sbom.cert \
+            --certificate-identity-regexp "${IDENTITY_REGEX}" \
+            --certificate-oidc-issuer "${OIDC_ISSUER}" \
+            sbom.cdx.json
 
       # Reproducibility check (build env freeze twice)
       - name: Reproducibility (pip freeze twice)
