@@ -4,38 +4,46 @@ name: Auto-patch CVEs (Python + SBOM + Attest)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 8 * * 1" # Mondays 08:00 UTC
+    - cron: "0 8 * * 1"
 
 permissions:
   contents: write
   pull-requests: write
-  id-token: write # needed for keyless signing (cosign)
+  id-token: write
 
 jobs:
   autopatch:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      # -----------------------------------------------------------
+      # Checkout repo
+      # -----------------------------------------------------------
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # -----------------------------------------------------------
+      # Setup Python
+      # -----------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       # -----------------------------------------------------------
-      # FIXED: Install project deps FIRST, then CLI deps.
+      # Install dependencies
       # -----------------------------------------------------------
       - name: Install autopatch deps
         run: |
           python -m pip install --upgrade pip
-          echo "Installing project requirements first..."
+          echo "Installing project dependencies (requirements.txt)..."
           if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
-          echo "Installing autopatch CLI helper deps..."
-          pip install packaging tabulate
+          echo "Installing autopatch tool dependencies..."
+          pip install requests packaging tabulate
 
-      # -- Create plan and capture exit code (10 means updates exist) --
+      # -----------------------------------------------------------
+      # Create plan (EXIT CODE = 10 → fixes exist)
+      # -----------------------------------------------------------
       - name: Create plan.csv
         id: plan
         shell: bash
@@ -48,12 +56,12 @@ jobs:
           exit 0
 
       - name: Show plan
-        run: |
-          echo "Plan (first 20 lines):"
-          head -n 20 plan.csv || true
+        run: head -n 20 plan.csv || true
 
-      # ---- SBOM generation ----
-      - name: Set up Node (for cdxgen)
+      # -----------------------------------------------------------
+      # SBOM (CycloneDX)
+      # -----------------------------------------------------------
+      - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -66,18 +74,27 @@ jobs:
           mkdir -p reports
           cdxgen -t python -o sbom.cdx.json .
 
-      # ---- OSV scan ----
+      # -----------------------------------------------------------
+      # Install OSV-Scanner (bulletproof)
+      # -----------------------------------------------------------
       - name: Install OSV-Scanner
         run: |
-          curl -sSfL https://raw.githubusercontent.com/google/osv-scanner/refs/heads/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-            echo "$HOME/.local/bin" >> $GITHUB_PATH
+          sudo apt-get update
+          sudo apt-get install -y wget gpg
+          wget https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_amd64.deb
+          sudo dpkg -i osv-scanner_amd64.deb
+          osv-scanner --version
 
       - name: Scan SBOM with OSV
         run: |
-          osv-scanner --sbom sbom.cdx.json --format json --output reports/osv-report.json
+          mkdir -p reports
+          osv-scanner --sbom sbom.cdx.json \
+            --format json \
+            --output reports/osv-report.json
 
-      # ---- Sign + verify SBOM ----
+      # -----------------------------------------------------------
+      # Sigstore signing
+      # -----------------------------------------------------------
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
@@ -91,53 +108,49 @@ jobs:
             sbom.cdx.json
 
       - name: Verify SBOM signature
-        run: |
-          cosign verify-blob --certificate sbom.cert --signature sbom.sig sbom.cdx.json
+        run: cosign verify-blob --certificate sbom.cert --signature sbom.sig sbom.cdx.json
 
-      # ---- Reproducibility test ----
+      # -----------------------------------------------------------
+      # Reproducibility test
+      # -----------------------------------------------------------
       - name: Reproducibility (pip freeze twice)
         shell: bash
         run: |
-          python -m venv .r1
-          source .r1/bin/activate
-          pip install -r requirements.txt
-          pip freeze > reports/freeze1.txt
+          python -m venv .r1 && source .r1/bin/activate && pip install -r requirements.txt && pip freeze > reports/freeze1.txt
           deactivate || true
-
-          python -m venv .r2
-          source .r2/bin/activate
-          pip install -r requirements.txt
-          pip freeze > reports/freeze2.txt
+          python -m venv .r2 && source .r2/bin/activate && pip install -r requirements.txt && pip freeze > reports/freeze2.txt
           deactivate || true
+          diff -u reports/freeze1.txt reports/freeze2.txt > reports/reproducibility.diff || true
 
-          diff -u reports/freeze1.txt reports/reproducibility.diff || true
-
-      # ---- Metrics ----
+      # -----------------------------------------------------------
+      # Metrics summary
+      # -----------------------------------------------------------
       - name: Build metrics summary
         shell: bash
         run: |
           python - <<'PY'
           import csv, json, os
-          fixable = 0
           total = 0
+          fixable = 0
           if os.path.exists("plan.csv"):
-              with open("plan.csv", newline="", encoding="utf-8") as f:
+              with open("plan.csv", encoding="utf-8") as f:
                   for row in csv.DictReader(f):
                       total += 1
                       if row.get("fix_version"):
                           fixable += 1
           metrics = {"packages_scanned": total, "packages_with_fixes": fixable}
           os.makedirs("reports", exist_ok=True)
-          with open("reports/metrics.json","w",encoding="utf-8") as f:
-              json.dump(metrics, f, indent=2)
+          with open("reports/metrics.json", "w", encoding="utf-8") as fw:
+              json.dump(metrics, fw, indent=2)
           print("Metrics:", metrics)
           PY
 
-      # ---- Apply fixes & create PR ----
+      # -----------------------------------------------------------
+      # Apply fixes and open PR (ONLY if updates exist)
+      # -----------------------------------------------------------
       - name: Apply plan to requirements.txt
         if: ${{ steps.plan.outputs.exit_code == '10' }}
-        run: |
-          python -m autopatch.cli apply -r requirements.txt -p plan.csv
+        run: python -m autopatch.cli apply -r requirements.txt -p plan.csv
 
       - name: Create pull request
         if: ${{ steps.plan.outputs.exit_code == '10' }}
@@ -146,16 +159,15 @@ jobs:
           commit-message: "autopatch: bump vulnerable dependencies (OSV)"
           title: "Autopatch: bump vulnerable dependencies"
           body: |
-            This PR was generated automatically by the autopatch workflow.
+            Automated autopatch workflow
 
-            **Evidence**
-            - SBOM: `sbom.cdx.json` (signed: `sbom.sig`, `sbom.cert`)
+            ## Evidence
+            - SBOM: `sbom.cdx.json` (signed)
             - OSV scan: `reports/osv-report.json`
             - Reproducibility diff: `reports/reproducibility.diff`
             - Plan: `plan.csv`
             - Metrics: `reports/metrics.json`
 
-            **Properties:** Transparency, Validity, Separation.
           branch: autopatch/osv-fixes
           add-paths: |
             requirements.txt
@@ -167,7 +179,9 @@ jobs:
             reports/reproducibility.diff
             reports/metrics.json
 
-      # ---- Upload artifacts ----
+      # -----------------------------------------------------------
+      # Upload artifacts
+      # -----------------------------------------------------------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
