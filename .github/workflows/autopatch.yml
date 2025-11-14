@@ -24,15 +24,18 @@ jobs:
         with:
           python-version: "3.11"
 
+      # -----------------------------------------------------------
+      # FIXED: Install project deps FIRST, then CLI deps.
+      # -----------------------------------------------------------
       - name: Install autopatch deps
         run: |
           python -m pip install --upgrade pip
-          # Ensure CLI deps are present even if your project requirements don't include them
-          pip install requests packaging tabulate
-          # Install target project deps (used by reproducibility check)
+          echo "Installing project requirements first..."
           if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
+          echo "Installing autopatch CLI helper deps..."
+          pip install packaging tabulate
 
-      # -- Create plan and capture exit code as a step output (10 = fixes exist) --
+      # -- Create plan and capture exit code (10 means updates exist) --
       - name: Create plan.csv
         id: plan
         shell: bash
@@ -49,7 +52,7 @@ jobs:
           echo "Plan (first 20 lines):"
           head -n 20 plan.csv || true
 
-      # ---- SBOM (Transparency) ----
+      # ---- SBOM generation ----
       - name: Set up Node (for cdxgen)
         uses: actions/setup-node@v4
         with:
@@ -63,7 +66,7 @@ jobs:
           mkdir -p reports
           cdxgen -t python -o sbom.cdx.json .
 
-      # ---- Scan (Transparency) ----
+      # ---- OSV scan ----
       - name: Install OSV-Scanner
         run: |
           curl -sSfL https://raw.githubusercontent.com/google/osv-scanner/main/install.sh \
@@ -73,7 +76,7 @@ jobs:
         run: |
           osv-scanner --sbom sbom.cdx.json --format json --output reports/osv-report.json
 
-      # ---- Sign + verify SBOM (Validity) ----
+      # ---- Sign + verify SBOM ----
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
@@ -90,7 +93,7 @@ jobs:
         run: |
           cosign verify-blob --certificate sbom.cert --signature sbom.sig sbom.cdx.json
 
-      # ---- Reproducibility smoke check (Validity) ----
+      # ---- Reproducibility test ----
       - name: Reproducibility (pip freeze twice)
         shell: bash
         run: |
@@ -106,9 +109,9 @@ jobs:
           pip freeze > reports/freeze2.txt
           deactivate || true
 
-          diff -u reports/freeze1.txt reports/freeze2.txt > reports/reproducibility.diff || true
+          diff -u reports/freeze1.txt reports/reproducibility.diff || true
 
-      # ---- Quick metrics (Transparency/Validity evidence) ----
+      # ---- Metrics ----
       - name: Build metrics summary
         shell: bash
         run: |
@@ -129,7 +132,7 @@ jobs:
           print("Metrics:", metrics)
           PY
 
-      # ---- Apply fixes & create PR (only if fixes exist) ----
+      # ---- Apply fixes & create PR ----
       - name: Apply plan to requirements.txt
         if: ${{ steps.plan.outputs.exit_code == '10' }}
         run: |
@@ -145,13 +148,13 @@ jobs:
             This PR was generated automatically by the autopatch workflow.
 
             **Evidence**
-            - SBOM (CycloneDX): `sbom.cdx.json` — signed (`sbom.sig`, `sbom.cert`)
+            - SBOM: `sbom.cdx.json` (signed: `sbom.sig`, `sbom.cert`)
             - OSV scan: `reports/osv-report.json`
             - Reproducibility diff: `reports/reproducibility.diff`
             - Plan: `plan.csv`
             - Metrics: `reports/metrics.json`
 
-            **Design properties:** Transparency (SBOM + scan), Validity (signing + reproducibility), Separation (ephemeral CI).
+            **Properties:** Transparency, Validity, Separation.
           branch: autopatch/osv-fixes
           add-paths: |
             requirements.txt
