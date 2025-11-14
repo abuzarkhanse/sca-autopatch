@@ -1,10 +1,10 @@
 from __future__ import annotations
 from typing import Dict, List, Tuple
 import re
-from packaging.version import Version # type: ignore
-
+from packaging.version import Version  # type: ignore
 
 REQ_LINE = re.compile(r"^\s*([A-Za-z0-9_.\-]+)\s*==\s*([A-Za-z0-9_.+\-]+)\s*$")
+
 
 def parse_requirements(path: str) -> List[Tuple[str, str]]:
     pkgs = []
@@ -15,12 +15,31 @@ def parse_requirements(path: str) -> List[Tuple[str, str]]:
                 pkgs.append((m.group(1), m.group(2)))
     return pkgs
 
+
 def write_requirements(path: str, rows: List[Tuple[str, str]]) -> None:
     with open(path, "w", encoding="utf-8") as f:
         for name, ver in rows:
             f.write(f"{name}=={ver}\n")
 
+
 def min_higher_version(current: str, candidates: List[str]) -> str | None:
+    """
+    Return the minimum valid version among candidates that is higher than current.
+    Skip invalid versions (like git commit hashes).
+    """
     cur = Version(current)
-    higher = [Version(v) for v in candidates if Version(v) > cur]
-    return str(min(higher)) if higher else None
+
+    valid_candidates = []
+    for v in candidates:
+        try:
+            ver = Version(v)
+            if ver > cur:
+                valid_candidates.append(ver)
+        except Exception:
+            # Skip invalid versions, e.g., git SHAs from OSV
+            continue
+
+    if not valid_candidates:
+        return None
+
+    return str(min(valid_candidates))
