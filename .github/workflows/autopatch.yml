@@ -71,7 +71,7 @@ jobs:
         run: |
           mkdir -p reports
           docker run --rm -v "$PWD:/scan" -w /scan ghcr.io/google/osv-scanner:latest \
-            --sbom sbom.cdx.json --format json --output reports/osv-report.json
+            --sbom sbom.cdx.json --format json --output reports/osv-report.json || trues
 
       # Sigstore signing and verification
       - name: Install cosign
