@@ -1,9 +1,7 @@
 
----
-
 ## 2) Add `docs/TECH_NOTE.md` (copy/paste)
 
-```markdown
+
 # TECH NOTE — Mapping the Prototype to the SoK Properties
 
 **Goal:** Demonstrate the SoK design properties — **Transparency, Validity, Separation** — with a minimal pipeline that produces verifiable evidence for dependency updates.
