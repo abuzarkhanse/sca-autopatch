@@ -68,10 +68,19 @@ jobs:
 
       # ---- OSV scan via Docker (bulletproof) ----
       - name: Scan SBOM with OSV (Docker)
+        shell: bash
         run: |
           mkdir -p reports
+          set +e
           docker run --rm -v "$PWD:/scan" -w /scan ghcr.io/google/osv-scanner:latest \
-            --sbom sbom.cdx.json --format json --output reports/osv-report.json || trues
+            -L sbom.cdx.json --format json --output reports/osv-report.json
+          code=$?
+          # OSV-Scanner uses: 0=no vulns, 1=vulns found, >1=actual error
+          if [[ $code -gt 1 ]]; then
+            echo "osv-scanner failed with exit code $code"
+            exit $code
+          fi
+          echo "osv-scanner exit code $code (0=no vulns, 1=vulns found). Continuing."
 
       # Sigstore signing and verification
       - name: Install cosign
