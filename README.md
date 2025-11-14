@@ -1,6 +1,8 @@
 # Supply‑chain Autopatch Prototype (SBOM → OSV → Signed Evidence)
 
-![Auto‑patch CVEs](https://github.com/abuzarkhanse/sca-autopatch/actions/workflows/autopatch.yml/badge.svg)
+
+![Auto-patch CVEs](https://github.com/abuzarkhanse/sca-autopatch/actions/workflows/autopatch.yml/badge.svg)
+
 
 **Why this matters:** A minimal, repeatable pipeline that implements **Transparency → Validity → Separation** for Python projects by generating a signed SBOM, scanning it with OSV, and opening an auto‑patch PR with evidence.
 
@@ -41,4 +43,5 @@ pip install -r requirements.txt
 python -m autopatch.cli plan  -r requirements.txt -o plan.csv
 # Optional (applies the plan to requirements.txt):
 python -m autopatch.cli apply -r requirements.txt -p plan.csv
+
 
