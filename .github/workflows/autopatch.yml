@@ -85,19 +85,25 @@ jobs:
       # Sigstore signing and verification
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
+        # (optional) pin to a specific version to avoid future CLI changes:
+        # with:
+        #   cosign-release: 'v2.3.0'
 
       - name: Sign SBOM (keyless)
         env:
-          COSIGN_EXPERIMENTAL: "true"
+          COSIGN_EXPERIMENTAL: "true" # harmless on v2; kept for compatibility
         run: |
-          cosign sign-blob --yes --keyless \
-            --output-signature sbom.sig \
-            --output-certificate sbom.cert \
-            sbom.cdx.json
+          cosign sign-blob --yes \
+          --output-signature sbom.sig \
+          --output-certificate sbom.cert \
+          sbom.cdx.json
 
       - name: Verify SBOM signature
         run: |
-          cosign verify-blob --certificate sbom.cert --signature sbom.sig sbom.cdx.json
+          cosign verify-blob \
+          --certificate sbom.cert \
+          --signature sbom.sig \
+          sbom.cdx.json
 
       # Reproducibility check (build env freeze twice)
       - name: Reproducibility (pip freeze twice)
