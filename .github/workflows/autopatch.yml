@@ -18,7 +18,7 @@ jobs:
     steps:
       # Checkout repo
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Python toolchain
       - name: Set up Python
